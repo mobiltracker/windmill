@@ -213,8 +213,7 @@ pub async fn handle_powershell_job(
             .collect::<Vec<(String, String)>>();
         args_owned
             .iter()
-            .map(|(n, v)| vec![format!("--{n}"), format!("{v}")])
-            .flatten()
+            .flat_map(|(n, v)| vec![format!("--{n}"), format!("{v}")])
             .collect::<Vec<_>>()
     };
 
@@ -234,29 +233,21 @@ pub async fn handle_powershell_job(
 
     let mut install_string: String = String::new();
     let mut logs1 = String::new();
-    let var_name = for line in content.lines() {
+    for line in content.lines() {
         for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
             let module = cap.get(1).unwrap().as_str();
             if !installed_modules.contains(&module.to_lowercase()) {
                 logs1.push_str(&format!("\n{} not found in cache", module));
                 // instead of using Install-Module, we use Save-Module so that we can specify the installation path
 
-                let raw_code = sqlx::query_scalar(
-                    format!(
-                        "SELECT content FROM script where hash = {}",
-                        module.to_string()
-                    )
-                    .as_str(),
+                let raw_code = sqlx::query_scalar!(
+                    "SELECT content FROM script where path = $1",
+                    module.to_string()
                 )
                 .fetch_optional(db)
                 .await?
                 .unwrap_or_else(|| "No script found at this hash".to_string());
-                write_file(
-                    job_dir,
-                    format!("{}.ps1", module.to_string()).as_str(),
-                    &raw_code,
-                )
-                .await?;
+                write_file(job_dir, format!("{}.ps1", module).as_str(), &raw_code).await?;
                 install_string.push_str(&format!(
                     "Save-Module -Path {} -Force {};",
                     POWERSHELL_CACHE_DIR, module
@@ -265,13 +256,13 @@ pub async fn handle_powershell_job(
                 logs1.push_str(&format!("\n{} found in cache", module));
             }
         }
-    };
+    }
 
     if !install_string.is_empty() {
         logs1.push_str("\n\nInstalling modules...");
         append_logs(&job.id, &job.workspace_id, logs1, db).await;
         let child = Command::new("pwsh")
-            .args(&["-Command", &install_string])
+            .args(["-Command", &install_string])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
