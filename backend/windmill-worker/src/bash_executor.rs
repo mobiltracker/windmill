@@ -1,7 +1,8 @@
 use std::{collections::HashMap, fs, process::Stdio};
 
+use mysql_async::prelude::ToValue;
 use regex::Regex;
-use serde_json::{json, value::RawValue};
+use serde_json::{json, to_string, value::RawValue};
 use sqlx::types::Json;
 use tokio::process::Command;
 use windmill_common::{error::Error, jobs::QueuedJob, worker::to_raw_value};
@@ -13,7 +14,7 @@ const NSJAIL_CONFIG_RUN_POWERSHELL_CONTENT: &str =
     include_str!("../nsjail/run.powershell.config.proto");
 
 lazy_static::lazy_static! {
-    static ref RE_POWERSHELL_IMPORTS: Regex = Regex::new(r#"^Import-Module\s+(?:-Name\s+)?"?([^-\s"]+)"?"#).unwrap();
+    static ref RE_POWERSHELL_IMPORTS: Regex = Regex::new(r#"^Import-Module\s+(?:-Name\s+)?(?:(?:"([^-\s"]+)")|(?:'([^-\s']+)')|([^-\s'"]+))"#).unwrap();
 }
 
 use crate::{
@@ -191,6 +192,8 @@ pub async fn handle_powershell_job(
     worker_name: &str,
     envs: HashMap<String, String>,
 ) -> Result<Box<RawValue>, Error> {
+    let mut code_content = content.to_string();
+    code_content = code_content.replace("", "");
     let pwsh_args = {
         let args = build_args_map(job, client, db).await?.map(Json);
         let job_args = if args.is_some() {
@@ -199,7 +202,7 @@ pub async fn handle_powershell_job(
             job.args.as_ref()
         };
 
-        let args_owned = windmill_parser_bash::parse_powershell_sig(&content)?
+        let args_owned = windmill_parser_bash::parse_powershell_sig(&code_content)?
             .args
             .iter()
             .map(|arg| {
@@ -235,23 +238,32 @@ pub async fn handle_powershell_job(
     let mut logs1 = String::new();
     for line in content.lines() {
         for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
-            let module = cap.get(1).unwrap().as_str();
+            let module = cap
+                .get(1)
+                .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
+                .as_str();
             if !installed_modules.contains(&module.to_lowercase()) {
-                logs1.push_str(&format!("\n{} not found in cache", module));
-                // instead of using Install-Module, we use Save-Module so that we can specify the installation path
-
-                let raw_code = sqlx::query_scalar!(
-                    "SELECT content FROM script where path = $1",
-                    module.to_string()
-                )
-                .fetch_optional(db)
-                .await?
-                .unwrap_or_else(|| "No script found at this hash".to_string());
-                write_file(job_dir, format!("{}.ps1", module).as_str(), &raw_code).await?;
-                install_string.push_str(&format!(
-                    "Save-Module -Path {} -Force {};",
-                    POWERSHELL_CACHE_DIR, module
-                ));
+                let module_name = module.to_string();
+                let content =
+                    sqlx::query_scalar!("SELECT content FROM script where path = $1", module_name)
+                        .fetch_optional(db)
+                        .await?;
+                if content.is_some() {
+                    let file_name = format!("{}.ps1", module_name.replace('/', "."));
+                    write_file(job_dir, &file_name, &content.unwrap()).await?;
+                    let file_name_dot_reference = format!("./{}", file_name);
+                    code_content = code_content.replace(
+                        line,
+                        format!("Import-Module {}", file_name_dot_reference).as_str(),
+                    );
+                } else {
+                    // instead of using Install-Module, we use Save-Module so that we can specify the installation path
+                    logs1.push_str(&format!("\n{} not found in cache", module_name));
+                    install_string.push_str(&format!(
+                        "Save-Module -Path {} -Force {};",
+                        POWERSHELL_CACHE_DIR, module_name
+                    ));
+                }
             } else {
                 logs1.push_str(&format!("\n{} found in cache", module));
             }
@@ -297,20 +309,20 @@ $env:PSModulePath = \"{}:$PSModulePathBackup\"",
         POWERSHELL_CACHE_DIR
     );
     // make sure param() is first
-    let param_match = windmill_parser_bash::RE_POWERSHELL_PARAM.find(&content);
-    let content: String = if let Some(param_match) = param_match {
+    let param_match = windmill_parser_bash::RE_POWERSHELL_PARAM.find(&code_content);
+    let _content: String = if let Some(param_match) = param_match {
         let param_match = param_match.as_str();
         format!(
             "{}\n{}\n{}",
             param_match,
             profile,
-            content.replace(param_match, "")
+            code_content.replace(param_match, "")
         )
     } else {
-        format!("{}\n{}", profile, content)
+        format!("{}\n{}", profile, code_content)
     };
 
-    write_file(job_dir, "main.ps1", content.as_str()).await?;
+    write_file(job_dir, "main.ps1", &code_content).await?;
     write_file(
         job_dir,
         "wrapper.sh",
