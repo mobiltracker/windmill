@@ -1,5 +1,8 @@
-use std::{collections::HashMap, fs, process::Stdio};
+use std::{collections::HashMap, fs, path::Path, process::Stdio};
 
+use anyhow::Result;
+use async_recursion::async_recursion;
+use futures::{future::BoxFuture, FutureExt, TryFutureExt};
 use mysql_async::prelude::ToValue;
 use regex::Regex;
 use serde_json::{json, to_string, value::RawValue};
@@ -178,6 +181,68 @@ fn raw_to_string(x: &str) -> String {
         _ => String::new(),
     }
 }
+
+#[async_recursion]
+pub async fn handle_powershell_deps(
+    install_string: &mut String,
+    installed_modules: &[String],
+    logs: &mut String,
+    job_dir: &str,
+    db: &sqlx::Pool<sqlx::Postgres>,
+    content: &str,
+) -> Result<String, Error> {
+    let mut code_content = content.to_string();
+    for line in content.lines() {
+        for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
+            let module = cap
+                .get(1)
+                .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
+                .as_str();
+            if !installed_modules.contains(&module.to_lowercase()) {
+                let module_name = module.to_string();
+                let content =
+                    sqlx::query_scalar!("SELECT content FROM script where path = $1", module_name)
+                        .fetch_optional(db)
+                        .await?;
+                if let Some(content) = content {
+                    let file_name = format!("{}.ps1", module_name.replace('/', "."));
+                    if !Path::new(format!("{}/{}", job_dir, file_name).as_str()).exists() {
+                        write_file(
+                            job_dir,
+                            &file_name,
+                            &handle_powershell_deps(
+                                install_string,
+                                installed_modules,
+                                logs,
+                                job_dir,
+                                db,
+                                &content,
+                            )
+                            .await?,
+                        )
+                        .await?;
+                    }
+                    let file_name_dot_reference = format!("./{}", file_name);
+                    code_content = code_content.replace(
+                        line,
+                        format!("Import-Module {}", file_name_dot_reference).as_str(),
+                    );
+                } else {
+                    // instead of using Install-Module, we use Save-Module so that we can specify the installation path
+                    logs.push_str(&format!("\n{} not found in cache", module_name));
+                    install_string.push_str(&format!(
+                        "Save-Module -Path {} -Force {};",
+                        POWERSHELL_CACHE_DIR, module_name
+                    ));
+                }
+            } else {
+                logs.push_str(&format!("\n{} found in cache", module));
+            }
+        }
+    }
+    return Ok(code_content);
+}
+
 #[tracing::instrument(level = "trace", skip_all)]
 pub async fn handle_powershell_job(
     mem_peak: &mut i32,
@@ -192,8 +257,6 @@ pub async fn handle_powershell_job(
     worker_name: &str,
     envs: HashMap<String, String>,
 ) -> Result<Box<RawValue>, Error> {
-    let mut code_content = content.to_string();
-    code_content = code_content.replace("", "");
     let pwsh_args = {
         let args = build_args_map(job, client, db).await?.map(Json);
         let job_args = if args.is_some() {
@@ -202,7 +265,7 @@ pub async fn handle_powershell_job(
             job.args.as_ref()
         };
 
-        let args_owned = windmill_parser_bash::parse_powershell_sig(&code_content)?
+        let args_owned = windmill_parser_bash::parse_powershell_sig(&content)?
             .args
             .iter()
             .map(|arg| {
@@ -236,39 +299,15 @@ pub async fn handle_powershell_job(
 
     let mut install_string: String = String::new();
     let mut logs1 = String::new();
-    for line in content.lines() {
-        for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
-            let module = cap
-                .get(1)
-                .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
-                .as_str();
-            if !installed_modules.contains(&module.to_lowercase()) {
-                let module_name = module.to_string();
-                let content =
-                    sqlx::query_scalar!("SELECT content FROM script where path = $1", module_name)
-                        .fetch_optional(db)
-                        .await?;
-                if content.is_some() {
-                    let file_name = format!("{}.ps1", module_name.replace('/', "."));
-                    write_file(job_dir, &file_name, &content.unwrap()).await?;
-                    let file_name_dot_reference = format!("./{}", file_name);
-                    code_content = code_content.replace(
-                        line,
-                        format!("Import-Module {}", file_name_dot_reference).as_str(),
-                    );
-                } else {
-                    // instead of using Install-Module, we use Save-Module so that we can specify the installation path
-                    logs1.push_str(&format!("\n{} not found in cache", module_name));
-                    install_string.push_str(&format!(
-                        "Save-Module -Path {} -Force {};",
-                        POWERSHELL_CACHE_DIR, module_name
-                    ));
-                }
-            } else {
-                logs1.push_str(&format!("\n{} found in cache", module));
-            }
-        }
-    }
+    let code_content = handle_powershell_deps(
+        &mut install_string,
+        &installed_modules,
+        &mut logs1,
+        job_dir,
+        db,
+        content,
+    )
+    .await?;
 
     if !install_string.is_empty() {
         logs1.push_str("\n\nInstalling modules...");
