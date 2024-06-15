@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, path::Path, process::Stdio};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    process::Stdio,
+};
 
 use anyhow::Result;
 use async_recursion::async_recursion;
@@ -186,6 +191,8 @@ fn raw_to_string(x: &str) -> String {
 pub async fn handle_powershell_deps(
     install_string: &mut String,
     installed_modules: &[String],
+    visited_nodes: &mut HashSet<String>,
+    source_file_name: &String,
     logs: &mut String,
     job_dir: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
@@ -199,13 +206,26 @@ pub async fn handle_powershell_deps(
                 .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
                 .as_str();
             if !installed_modules.contains(&module.to_lowercase()) {
-                let module_name = module.to_string();
+                let module_name = if module != *source_file_name {
+                    module.to_string()
+                } else {
+                    "main".to_string()
+                };
                 let content =
-                    sqlx::query_scalar!("SELECT content FROM script where path = $1", module_name)
+                    sqlx::query_scalar!("SELECT content FROM script where path = $1", &module_name)
                         .fetch_optional(db)
                         .await?;
+                let file_name = format!("{}.ps1", &module_name.replace('/', "."));
+                let file_name_dot_reference = format!("./{}", file_name);
+                code_content = code_content.replace(
+                    line,
+                    format!("Import-Module {}", file_name_dot_reference).as_str(),
+                );
+                if visited_nodes.contains(&module_name) {
+                    continue;
+                }
+                visited_nodes.insert(module_name.clone());
                 if let Some(content) = content {
-                    let file_name = format!("{}.ps1", module_name.replace('/', "."));
                     if !Path::new(format!("{}/{}", job_dir, file_name).as_str()).exists() {
                         write_file(
                             job_dir,
@@ -213,6 +233,8 @@ pub async fn handle_powershell_deps(
                             &handle_powershell_deps(
                                 install_string,
                                 installed_modules,
+                                visited_nodes,
+                                source_file_name,
                                 logs,
                                 job_dir,
                                 db,
@@ -222,11 +244,6 @@ pub async fn handle_powershell_deps(
                         )
                         .await?;
                     }
-                    let file_name_dot_reference = format!("./{}", file_name);
-                    code_content = code_content.replace(
-                        line,
-                        format!("Import-Module {}", file_name_dot_reference).as_str(),
-                    );
                 } else {
                     // instead of using Install-Module, we use Save-Module so that we can specify the installation path
                     logs.push_str(&format!("\n{} not found in cache", module_name));
@@ -265,7 +282,7 @@ pub async fn handle_powershell_job(
             job.args.as_ref()
         };
 
-        let args_owned = windmill_parser_bash::parse_powershell_sig(&content)?
+        let args_owned = windmill_parser_bash::parse_powershell_sig(content)?
             .args
             .iter()
             .map(|arg| {
@@ -299,9 +316,17 @@ pub async fn handle_powershell_job(
 
     let mut install_string: String = String::new();
     let mut logs1 = String::new();
+    let file_name = sqlx::query_scalar!("SELECT path FROM script WHERE content = $1", content)
+        .fetch_optional(db)
+        .await?
+        .unwrap_or_default();
+    let mut visited_nodes: HashSet<String> = HashSet::new();
+    visited_nodes.insert("main".to_string());
     let code_content = handle_powershell_deps(
         &mut install_string,
         &installed_modules,
+        &mut visited_nodes,
+        &file_name,
         &mut logs1,
         job_dir,
         db,
