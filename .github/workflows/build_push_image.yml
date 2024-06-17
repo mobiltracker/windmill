@@ -61,7 +61,8 @@ jobs:
           VERSION: ${{ env.VERSION }}
           REPO: 859499744640.dkr.ecr.sa-east-1.amazonaws.com
         run: |
-          docker push windmill:${VERSION} ${REPO}/windmill:${VERSION}
+          docker tag windmill:${VERSION} ${REPO}/windmill:${VERSION}
+          docker push ${REPO}/windmill:${VERSION}
 
       - name: Create version tag on repository
         env:
