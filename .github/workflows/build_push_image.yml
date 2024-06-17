@@ -50,19 +50,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-
 
-      - name: Setup Cargo
-        run: |
-          sudo apt install cargo
-
-      - name: Install sqlx via Cargo
-        run: |
-          cargo install sqlx-cli
-
-      - name: Prepare sqlx queries
-        run: |
-          cd backend
-          cargo sqlx prepare
-
       - name: Build
         env:
           VERSION: ${{ env.VERSION }}
