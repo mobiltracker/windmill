@@ -1,16 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::Path,
+    path::{Component, Path, PathBuf},
     process::Stdio,
 };
 
 use anyhow::Result;
 use async_recursion::async_recursion;
-use futures::{future::BoxFuture, FutureExt, TryFutureExt};
-use mysql_async::prelude::ToValue;
+use deno_core::resolve_path;
 use regex::Regex;
-use serde_json::{json, to_string, value::RawValue};
+use serde_json::{json, value::RawValue};
 use sqlx::types::Json;
 use tokio::process::Command;
 use windmill_common::{error::Error, jobs::QueuedJob, worker::to_raw_value};
@@ -60,7 +59,7 @@ pub async fn handle_bash_job(
     write_file(
         job_dir,
         "wrapper.sh",
-        &format!("set -o pipefail\nset -e\nmkfifo bp\ncat bp | tail -1 > ./result2.out &\n /bin/bash ./main.sh \"$@\" 2>&1 | tee bp\nwait $!"),
+        "set -o pipefail\nset -e\nmkfifo bp\ncat bp | tail -1 > ./result2.out &\n /bin/bash ./main.sh \"$@\" 2>&1 | tee bp\nwait $!",
     )
     .await?;
 
@@ -187,12 +186,32 @@ fn raw_to_string(x: &str) -> String {
     }
 }
 
+fn parse_path(path: &Path) -> PathBuf {
+    let mut components = path.components().peekable();
+    let mut result = PathBuf::new();
+
+    if let Some(Component::RootDir) = components.peek() {
+        result.push(components.next().unwrap());
+    }
+
+    for component in components {
+        match component {
+            Component::ParentDir => {
+                result.pop();
+            }
+            Component::CurDir => {}
+            _ => result.push(component.as_os_str()),
+        }
+    }
+    result
+}
+
 #[async_recursion]
 pub async fn handle_powershell_deps(
     install_string: &mut String,
     installed_modules: &[String],
     visited_nodes: &mut HashSet<String>,
-    source_file_name: &String,
+    source_file_name: &str,
     logs: &mut String,
     job_dir: &str,
     db: &sqlx::Pool<sqlx::Postgres>,
@@ -201,30 +220,37 @@ pub async fn handle_powershell_deps(
     let mut code_content = content.to_string();
     for line in content.lines() {
         for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
-            let module = cap
+            let mut module = cap
                 .get(1)
                 .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
-                .as_str();
+                .as_str()
+                .to_string()
+                .replace(".ps1", "");
             if !installed_modules.contains(&module.to_lowercase()) {
-                let module_name = if module != *source_file_name {
-                    module.to_string()
-                } else {
-                    "main".to_string()
-                };
-                let content =
-                    sqlx::query_scalar!("SELECT content FROM script where path = $1", &module_name)
-                        .fetch_optional(db)
-                        .await?;
-                let file_name = format!("{}.ps1", &module_name.replace('/', "."));
+                if !module.starts_with("f/") && !module.starts_with("u/") {
+                    let script_folder = Path::new(source_file_name)
+                        .parent()
+                        .unwrap()
+                        .join(module.clone());
+                    module = parse_path(&script_folder).to_str().unwrap().to_string();
+                }
+                if module == *source_file_name {
+                    module = "main".to_string();
+                }
+                let file_name = format!("{}.ps1", &module.replace('/', "."));
                 let file_name_dot_reference = format!("./{}", file_name);
                 code_content = code_content.replace(
                     line,
                     format!("Import-Module {}", file_name_dot_reference).as_str(),
                 );
-                if visited_nodes.contains(&module_name) {
+                if visited_nodes.contains(&module) {
                     continue;
                 }
-                visited_nodes.insert(module_name.clone());
+                visited_nodes.insert(module.clone());
+                let content =
+                    sqlx::query_scalar!("SELECT content FROM script where path = $1", &module)
+                        .fetch_optional(db)
+                        .await?;
                 if let Some(content) = content {
                     if !Path::new(format!("{}/{}", job_dir, file_name).as_str()).exists() {
                         write_file(
@@ -246,10 +272,10 @@ pub async fn handle_powershell_deps(
                     }
                 } else {
                     // instead of using Install-Module, we use Save-Module so that we can specify the installation path
-                    logs.push_str(&format!("\n{} not found in cache", module_name));
+                    logs.push_str(&format!("\n{} not found in cache", module));
                     install_string.push_str(&format!(
                         "Save-Module -Path {} -Force {};",
-                        POWERSHELL_CACHE_DIR, module_name
+                        POWERSHELL_CACHE_DIR, module
                     ));
                 }
             } else {
@@ -316,17 +342,13 @@ pub async fn handle_powershell_job(
 
     let mut install_string: String = String::new();
     let mut logs1 = String::new();
-    let file_name = sqlx::query_scalar!("SELECT path FROM script WHERE content = $1", content)
-        .fetch_optional(db)
-        .await?
-        .unwrap_or_default();
     let mut visited_nodes: HashSet<String> = HashSet::new();
     visited_nodes.insert("main".to_string());
     let code_content = handle_powershell_deps(
         &mut install_string,
         &installed_modules,
         &mut visited_nodes,
-        &file_name,
+        job.script_path(),
         &mut logs1,
         job_dir,
         db,
