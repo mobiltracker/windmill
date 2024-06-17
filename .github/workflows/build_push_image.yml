@@ -1,7 +1,7 @@
-name: Build Docker image
+name: Build and push Docker image
 jobs:
-  build-docker-image:
-    name: Build Docker image
+  build-push-docker-image:
+    name: Build and push Docker image
     runs-on: ubuntu-latest
 
     steps:
