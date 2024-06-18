@@ -64,15 +64,15 @@ jobs:
           VERSION: ${{ env.VERSION }}
           REPO: 859499744640.dkr.ecr.sa-east-1.amazonaws.com
         with:
-          cache-from: |
-            type=local,src=~/.cache/docker/buildx
-          cache-to: |
-            type=local,src=~/.cache/docker/buildx
+          cache-from: type=local,src=~/.cache/docker/buildx
+          cache-to: type=local,src=~/.cache/docker/buildx
           context: .
+          file: ./Dockerfile
           push: true
+          provenance: false
           tags: |
-            859499744640.dkr.ecr.sa-east-1.amazonaws.com/windmill:latest
-            859499744640.dkr.ecr.sa-east-1.amazonaws.com/windmill:${VERSION}
+            ${REPO}/windmill:latest
+            ${REPO}/windmill:${VERSION}
 
       - name: Create version tag on repository
         env:
