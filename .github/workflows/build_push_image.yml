@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.cache/docker/buildx
-        key: ${{ runner.os }}-docker-buildx
+          key: ${{ runner.os }}-docker-buildx
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
