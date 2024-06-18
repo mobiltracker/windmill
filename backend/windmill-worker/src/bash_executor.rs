@@ -226,7 +226,8 @@ pub async fn handle_powershell_deps(
                 .to_string()
                 .replace(".ps1", "");
             if !installed_modules.contains(&module.to_lowercase()) {
-                if !module.starts_with("f/") && !module.starts_with("u/") {
+                if !module.starts_with("f/") && !module.starts_with("u/") && module.starts_with('.')
+                {
                     let script_folder = Path::new(source_file_name)
                         .parent()
                         .unwrap()
