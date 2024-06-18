@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::Result;
 use async_recursion::async_recursion;
-use deno_core::resolve_path;
 use regex::Regex;
 use serde_json::{json, value::RawValue};
 use sqlx::types::Json;
