@@ -71,7 +71,6 @@ jobs:
           context: .
           push: true
           tags: |
-            ${REPO}/windmill:latest
             ${REPO}/windmill:${VERSION}
 
       - name: Create version tag on repository
