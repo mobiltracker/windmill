@@ -70,7 +70,9 @@ jobs:
             type=local,src=~/.cache/docker/buildx
           context: .
           push: true
-          tags: ${REPO}/windmill:latest,${REPO}/windmill:${VERSION}
+          tags: |
+            ${REPO}/windmill:latest
+            ${REPO}/windmill:${VERSION}
 
       - name: Create version tag on repository
         env:
