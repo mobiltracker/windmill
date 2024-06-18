@@ -32,6 +32,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             backend/target/
+            /usr/local/cargo/registry
           key: ${{ runner.os }}-cargo-${{ hashFiles('backend/Cargo.lock') }}
 
       - name: Get npm cache directory
