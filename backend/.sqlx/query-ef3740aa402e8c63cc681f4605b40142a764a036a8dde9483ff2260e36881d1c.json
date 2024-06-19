@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT content FROM script where path = $1",
+  "query": "SELECT content FROM script where path = $1 ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       false
     ]
   },
-  "hash": "c195f71a56869ac273a7aecbfca25aaa6d3d405d2ef5eeb82e254219807afc3c"
+  "hash": "ef3740aa402e8c63cc681f4605b40142a764a036a8dde9483ff2260e36881d1c"
 }
