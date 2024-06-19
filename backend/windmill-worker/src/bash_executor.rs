@@ -20,7 +20,7 @@ const NSJAIL_CONFIG_RUN_POWERSHELL_CONTENT: &str =
     include_str!("../nsjail/run.powershell.config.proto");
 
 lazy_static::lazy_static! {
-    static ref RE_POWERSHELL_IMPORTS: Regex = Regex::new(r#"^Import-Module\s+(?:-Name\s+)?(?:(?:"([^-\s"]+)")|(?:'([^-\s']+)')|([^-\s'"]+))"#).unwrap();
+    static ref RE_POWERSHELL_IMPORTS: Regex = Regex::new(r#"^(?i)Import-Module(?-i)\s+(?:-Force\s+)?(?:-Name\s+)?(?:(?:"([^-\s"]+)")|(?:'([^-\s']+)')|([^-\s'"]+))"#).unwrap();
 }
 
 use crate::{
@@ -219,12 +219,11 @@ pub async fn handle_powershell_deps(
     let mut code_content = content.to_string();
     for line in content.lines() {
         for cap in RE_POWERSHELL_IMPORTS.captures_iter(line) {
-            let mut module = cap
+            let raw_module = cap
                 .get(1)
                 .unwrap_or_else(|| cap.get(2).unwrap_or_else(|| cap.get(3).unwrap()))
-                .as_str()
-                .to_string()
-                .replace(".ps1", "");
+                .as_str();
+            let mut module = raw_module.to_string().replace(".ps1", "");
             if !installed_modules.contains(&module.to_lowercase()) {
                 if module.starts_with("f/") || module.starts_with("u/") || module.starts_with('.') {
                     if !module.starts_with("f/")
@@ -242,10 +241,9 @@ pub async fn handle_powershell_deps(
                     }
                     let file_name = format!("{}.ps1", &module.replace('/', "."));
                     let file_name_dot_reference = format!("./{}", file_name);
-                    code_content = code_content.replace(
-                        line,
-                        format!("Import-Module {}", file_name_dot_reference).as_str(),
-                    );
+                    let whole_match = cap.get(0).unwrap().as_str();
+                    let import_string = whole_match.replace(raw_module, &file_name_dot_reference);
+                    code_content = code_content.replace(whole_match, &import_string);
                     if visited_nodes.contains(&module) {
                         continue;
                     }
@@ -278,14 +276,14 @@ pub async fn handle_powershell_deps(
                     }
                 } else {
                     // instead of using Install-Module, we use Save-Module so that we can specify the installation path
-                    logs.push_str(&format!("\n{} not found in cache", module));
+                    logs.push_str(&format!("\n{} not found in cache", raw_module));
                     install_string.push_str(&format!(
                         "Save-Module -Path {} -Force {};",
-                        POWERSHELL_CACHE_DIR, module
+                        POWERSHELL_CACHE_DIR, raw_module
                     ));
                 }
             } else {
-                logs.push_str(&format!("\n{} found in cache", module));
+                logs.push_str(&format!("\n{} found in cache", raw_module));
             }
         }
     }
