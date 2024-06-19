@@ -226,49 +226,55 @@ pub async fn handle_powershell_deps(
                 .to_string()
                 .replace(".ps1", "");
             if !installed_modules.contains(&module.to_lowercase()) {
-                if !module.starts_with("f/") && !module.starts_with("u/") && module.starts_with('.')
-                {
-                    let script_folder = Path::new(source_file_name)
-                        .parent()
-                        .unwrap()
-                        .join(module.clone());
-                    module = parse_path(&script_folder).to_str().unwrap().to_string();
-                }
-                if module == *source_file_name {
-                    module = "main".to_string();
-                }
-                let file_name = format!("{}.ps1", &module.replace('/', "."));
-                let file_name_dot_reference = format!("./{}", file_name);
-                code_content = code_content.replace(
-                    line,
-                    format!("Import-Module {}", file_name_dot_reference).as_str(),
-                );
-                if visited_nodes.contains(&module) {
-                    continue;
-                }
-                visited_nodes.insert(module.clone());
-                let content =
-                    sqlx::query_scalar!("SELECT content FROM script where path = $1", &module)
-                        .fetch_optional(db)
-                        .await?;
-                if let Some(content) = content {
-                    if !Path::new(format!("{}/{}", job_dir, file_name).as_str()).exists() {
-                        write_file(
-                            job_dir,
-                            &file_name,
-                            &handle_powershell_deps(
-                                install_string,
-                                installed_modules,
-                                visited_nodes,
-                                source_file_name,
-                                logs,
+                if module.starts_with("f/") || module.starts_with("u/") || module.starts_with('.') {
+                    if !module.starts_with("f/")
+                        && !module.starts_with("u/")
+                        && module.starts_with('.')
+                    {
+                        let script_folder = Path::new(source_file_name)
+                            .parent()
+                            .unwrap()
+                            .join(module.clone());
+                        module = parse_path(&script_folder).to_str().unwrap().to_string();
+                    }
+                    if module == *source_file_name {
+                        module = "main".to_string();
+                    }
+                    let file_name = format!("{}.ps1", &module.replace('/', "."));
+                    let file_name_dot_reference = format!("./{}", file_name);
+                    code_content = code_content.replace(
+                        line,
+                        format!("Import-Module {}", file_name_dot_reference).as_str(),
+                    );
+                    if visited_nodes.contains(&module) {
+                        continue;
+                    }
+                    visited_nodes.insert(module.clone());
+                    let content = sqlx::query_scalar!(
+                        "SELECT content FROM script where path = $1 ORDER BY created_at DESC",
+                        &module
+                    )
+                    .fetch_optional(db)
+                    .await?;
+                    if let Some(content) = content {
+                        if !Path::new(format!("{}/{}", job_dir, file_name).as_str()).exists() {
+                            write_file(
                                 job_dir,
-                                db,
-                                &content,
+                                &file_name,
+                                &handle_powershell_deps(
+                                    install_string,
+                                    installed_modules,
+                                    visited_nodes,
+                                    source_file_name,
+                                    logs,
+                                    job_dir,
+                                    db,
+                                    &content,
+                                )
+                                .await?,
                             )
-                            .await?,
-                        )
-                        .await?;
+                            .await?;
+                        }
                     }
                 } else {
                     // instead of using Install-Module, we use Save-Module so that we can specify the installation path
@@ -344,7 +350,7 @@ pub async fn handle_powershell_job(
     let mut logs1 = String::new();
     let mut visited_nodes: HashSet<String> = HashSet::new();
     visited_nodes.insert("main".to_string());
-    let code_content = handle_powershell_deps(
+    let mut code_content = handle_powershell_deps(
         &mut install_string,
         &installed_modules,
         &mut visited_nodes,
@@ -396,7 +402,7 @@ $env:PSModulePath = \"{}:$PSModulePathBackup\"",
     );
     // make sure param() is first
     let param_match = windmill_parser_bash::RE_POWERSHELL_PARAM.find(&code_content);
-    let _content: String = if let Some(param_match) = param_match {
+    code_content = if let Some(param_match) = param_match {
         let param_match = param_match.as_str();
         format!(
             "{}\n{}\n{}",
